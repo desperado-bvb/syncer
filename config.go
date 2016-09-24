@@ -37,6 +37,7 @@ func NewConfig() *Config {
 	fs.StringVar(&cfg.LogFile, "log-file", "", "log file path")
 	fs.StringVar(&cfg.LogRotate, "log-rotate", "", "log file rotate type, hour/day")
 	fs.StringVar(&cfg.DbType, "db-type", "Mysql", "to db type: Mysql, PostgreSQL")
+	fs.IntVar(&cfg.KsTime, "ks", "", "Unsign time")
 
 	return cfg
 }
@@ -57,6 +58,20 @@ func (c *DBConfig) String() string {
 		return "<nil>"
 	}
 	return fmt.Sprintf("DBConfig(%+v)", *c)
+}
+
+// StoreConfig is the tidb-store configuration.
+type StoreConfig struct {
+	Name string `toml:"name" json:"name"`
+
+	Path string `toml:"path" json:"path"`
+}
+
+func (c *StoreConfig) String() string {
+	if c == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("StoreConfig(%+v)", *c)
 }
 
 // Config is the configuration.
@@ -83,7 +98,11 @@ type Config struct {
 
 	To DBConfig `toml:"to" json:"to"`
 
+	Store StoreConfig `toml:"store" json:"store"`
+
 	DbType string `toml:"db-type" json:"db-type"`
+
+	KsTime int `toml:"ks time" json:"ks time"`
 
 	configFile string
 }

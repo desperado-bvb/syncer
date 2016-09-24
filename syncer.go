@@ -4,7 +4,52 @@ import (
 	"github.com/juju/errors"
 	"github.com/pingcap/tidb/model"
 	pb "github.com/pingcap/tipb/go-binlog"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/store/tikv"
 )
+
+type Syncer struct {
+	sync.Mutex
+
+	cfg *Config
+
+	meta *Schema
+
+	db *Mysql
+
+	wg    sync.WaitGroup
+	jobWg sync.WaitGroup
+
+	input []chan interface{}
+
+	store *kv.Storage
+	toDB  *sql.DB
+
+	done chan struct{}
+	jobs []chan *job
+
+}
+
+func NewSyncer(cfg *Config) *Syncer {
+	syncer := new(Syncer)
+	syncer.cfg = cfg
+	syncer.db = new Mysql()
+
+	kv := tikv.Driver{}        
+	s := cfg.DbName    
+	p := cfg.DbHost        
+	path := fmt.Sprintf("%s://%s", s, p)        
+	syncer.store, err := kv.Open(path)
+	if err != nil {                
+		stop(err)        
+	}        
+	defer syncer.store.Close()
+
+	syncer.meta = NewSchema(syncer.db,cfg.KsTime)
+	syncer.done = make(chan struct{})
+	syncer.jobs = newJobChans(cfg.WorkerCount)
+	return syncer
+}
 
 func (s *Syncer) getSchemaInfo(id int64, sql string) (string, error) {
 	job, err := s.getHistoryJob(id)
@@ -53,7 +98,7 @@ func (s *Syncer) getSchemaInfo(id int64, sql string) (string, error) {
 	
 }
 
-func (s *Syncer) s.getHistoryJob(id int64) err {
+func (s *Syncer) getHistoryJob(id int64) err {
 	version, err := s.store.CurrentVersion()
         if err != nil {
                 return nil, errors.Trace(err)
@@ -116,7 +161,7 @@ func (s *Syncer) run() error {
 
 			for _, mutation := range mutations {
 				if len(mutation.GetInsertedRows()) > 0 {
-					sql, arg, err := s.db.genInsertSQLs(schema, table, mutation.GetInsertedRows())
+					sql, arg, err := s.db.(schema, table, mutation.GetInsertedRows())
 					if err != nil {
 						return errors.Errorf("gen insert sqls failed: %v, schema: %s, table: %s", err, schema, table.Name)
 					}
