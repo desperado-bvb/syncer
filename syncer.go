@@ -28,7 +28,7 @@ type Syncer struct {
 	toDB  *sql.DB
 
 	done chan struct{}
-	jobs []chan *job
+	jobs chan *job
 
 }
 
@@ -36,21 +36,97 @@ func NewSyncer(cfg *Config) *Syncer {
 	syncer := new(Syncer)
 	syncer.cfg = cfg
 	syncer.db = new Mysql()
-
-	kv := tikv.Driver{}        
-	s := cfg.DbName    
-	p := cfg.DbHost        
-	path := fmt.Sprintf("%s://%s", s, p)        
-	syncer.store, err := kv.Open(path)
-	if err != nil {                
-		stop(err)        
-	}        
-	defer syncer.store.Close()
-
 	syncer.meta = NewSchema(syncer.db,cfg.KsTime)
 	syncer.done = make(chan struct{})
 	syncer.jobs = newJobChans(cfg.WorkerCount)
 	return syncer
+}
+
+func newJobChans(count int) []chan *job {
+	jobs := make([]chan *job, 0, count)
+	for i := 0; i < count; i++ {
+		jobs = append(jobs, make(chan *job, 1000))
+	}
+
+	return jobs
+}
+
+func closeJobChans(jobs []chan *job) {
+	for _, ch := range jobs {
+		close(ch)
+	}
+}
+
+func (s *Syncer) addJob(job *job) error {
+	s.jobWg.Add(1)
+
+	s.jobs <- job
+
+	wait := s.checkWait(job)
+	if wait {
+		s.jobWg.Wait()
+
+		err := s.meta.Save(job.pos)
+		if err != nil {
+			return errors.Trace(err)
+		}
+	}
+
+	return nil
+}
+
+// Start starts syncer.
+func (s *Syncer) Start() error {
+	err := s.meta.Load()
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	s.wg.Add(1)
+
+	err = s.run()
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	s.done <- struct{}{}
+
+	return nil
+}
+
+func (s *Syncer) checkBinlogFormat() error {
+	rows, err := s.fromDB.Query(`SHOW GLOBAL VARIABLES LIKE "binlog_format";`)
+	if err != nil {
+		return errors.Trace(err)
+	}
+	defer rows.Close()
+
+	// Show an example.
+	/*
+		mysql> SHOW GLOBAL VARIABLES LIKE "binlog_format";
+		+---------------+-------+
+		| Variable_name | Value |
+		+---------------+-------+
+		| binlog_format | ROW   |
+		+---------------+-------+
+	*/
+	for rows.Next() {
+		var (
+			variable string
+			value    string
+		)
+
+		err = rows.Scan(&variable, &value)
+		if err != nil {
+			return errors.Trace(err)
+		}
+	}
+
+	if rows.Err() != nil {
+		return errors.Trace(rows.Err())
+	}
+
+	return nil
 }
 
 func (s *Syncer) getSchemaInfo(id int64, sql string) (string, error) {
@@ -215,7 +291,37 @@ func (s *Syncer) getHistoryJob(id int64) err {
 }
 
 func (s *Syncer) run() error {
+	kv := tikv.Driver{}
+	path := fmt.Sprintf("%s://%s", cfg.Store.Name, cfg.Store.Path)
+	syncer.store, err := kv.Open(path)
+	if err != nil {
+		stop(err)
+	}
+	defer syncer.store.Close()
 	defer s.wg.Done()
+
+	err = s.checkBinlogFormat()
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	streamer, err := s.syncer.StartSync(s.meta.Pos())
+	if err != nil {
+		return errors.Trace(err)
+	}
+
+	s.start = time.Now()
+	s.lastTime = s.start
+
+	s.wg.Add(s.cfg.WorkerCount)
+	for i := 0; i < s.cfg.WorkerCount; i++ {
+		go s.sync(s.toDBs[i], s.jobs[i])
+	}
+
+	s.wg.Add(1)
+	go s.printStatus()
+
+	pos := s.meta.Pos()
 
 	//todb: input
 	for {
