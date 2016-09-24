@@ -9,14 +9,14 @@ import (
 
 type Schema struct {
 	//todo: NameToID is nedd?
-	schemaNameToID 	map[string]int64
-	tableNameToID  	map[tableName]int64
-	columnNameToID 	map[columnName]int64
-	tableIDToName   map[int64] tableName
+	schemaNameToID map[string]int64
+	tableNameToID  map[tableName]int64
+	columnNameToID map[columnName]int64
+	tableIDToName  map[int64]tableName
 
-	schemas        	map[int64]*model.DBInfo
-	tables         	map[int64]*model.TableInfo
-	columns        	map[int64]*model.ColumnInfo
+	schemas map[int64]*model.DBInfo
+	tables  map[int64]*model.TableInfo
+	columns map[int64]*model.ColumnInfo
 
 	schemaMetaVersion int64
 }
@@ -46,7 +46,7 @@ func (s *Schema) SyncTiDBSchema(store kv.Storage, ts uint64) error {
 	s.schemaNameToID = make(map[string]int64)
 	s.tableNameToID = make(map[tableName]int64)
 	s.columnNameToID = make(map[columnName]int64)
-	s.tableIDToName  = make(map[int64]tableName)
+	s.tableIDToName = make(map[int64]tableName)
 	s.schemas = make(map[int64]*model.DBInfo)
 	s.tables = make(map[int64]*model.TableInfo)
 	s.columns = make(map[int64]*model.ColumnInfo)

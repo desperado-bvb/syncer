@@ -22,7 +22,10 @@ type Syncer struct {
 	wg    sync.WaitGroup
 	jobWg sync.WaitGroup
 
+	syncer *syncTiDBSchema
+
 	input []chan interface{}
+	pos *mysql.Position
 
 	store *kv.Storage
 	toDB  *sql.DB
@@ -36,7 +39,7 @@ func NewSyncer(cfg *Config) *Syncer {
 	syncer := new(Syncer)
 	syncer.cfg = cfg
 	syncer.db = new Mysql()
-	syncer.meta = NewSchema(syncer.db,cfg.KsTime)
+	syncer.meta = NewSchema(syncer.db,cfg.KsTime) // err
 	syncer.done = make(chan struct{})
 	syncer.jobs = newJobChans(cfg.WorkerCount)
 	return syncer
@@ -290,6 +293,121 @@ func (s *Syncer) getHistoryJob(id int64) err {
 	return job, err
 }
 
+func (s *Syncer) Pos() mysql.Position {
+	s.RLock()
+	defer s.RUnlock()// err isthis lock right?
+
+	return mysql.Position{Name: s.BinLogName, Pos: s.BinLogPos}
+}
+
+func (s *Syncer) printStatus() {
+	defer s.wg.Done()
+
+	timer := time.NewTicker(statusTime)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-timer.C:
+			now := time.Now()
+			seconds := now.Unix() - s.lastTime.Unix()
+			totalSeconds := now.Unix() - s.start.Unix()
+			last := s.lastCount.Get()
+			total := s.count.Get()
+
+			tps, totalTps := int64(0), int64(0)
+			if seconds > 0 {
+				tps = (total - last) / seconds
+				totalTps = total / totalSeconds
+			}
+
+			log.Infof("[syncer]total events = %d, insert = %d, update = %d, delete = %d, total tps = %d, recent tps = %d, %s.",
+				total, s.insertCount.Get(), s.updateCount.Get(), s.deleteCount.Get(), totalTps, tps, s.meta)
+
+			s.lastCount.Set(total)
+			s.lastTime = time.Now()
+		}
+	}
+}
+
+func (s *Syncer) sync(db *sql.DB, jobChan chan *job) {
+	defer s.wg.Done()
+
+	idx := 0
+	count := s.cfg.Batch
+	sqls := make([]string, 0, count)
+	args := make([][]interface{}, 0, count)
+	lastSyncTime := time.Now()
+
+	var err error
+	for {
+		select {
+		case job, ok := <-jobChan:
+			if !ok {
+				return
+			}
+
+			idx++
+
+			if job.tp == ddl {
+				err = executeSQL(db, sqls, args, true)
+				if err != nil {
+					log.Fatalf(errors.ErrorStack(err))
+				}
+
+				err = executeSQL(db, []string{job.sql}, [][]interface{}{job.args}, false)
+				if err != nil {
+					if !ignoreDDLError(err) {
+						log.Fatalf(errors.ErrorStack(err))
+					} else {
+						log.Warnf("[ignore ddl error][sql]%s[args]%v[error]%v", job.sql, job.args, err)
+					}
+				}
+
+				idx = 0
+				sqls = sqls[0:0]
+				args = args[0:0]
+				lastSyncTime = time.Now()
+			} else {
+				sqls = append(sqls, job.sql)
+				args = append(args, job.args)
+			}
+
+			if idx >= count {
+				err = executeSQL(db, sqls, args, true)
+				if err != nil {
+					log.Fatalf(errors.ErrorStack(err))
+				}
+
+				idx = 0
+				sqls = sqls[0:0]
+				args = args[0:0]
+				lastSyncTime = time.Now()
+			}
+
+			s.addCount(job.tp)
+			s.jobWg.Done()
+		default:
+			now := time.Now()
+			if now.Sub(lastSyncTime) >= maxWaitTime {
+				err = executeSQL(db, sqls, args, true)
+				if err != nil {
+					log.Fatalf(errors.ErrorStack(err))
+				}
+
+				idx = 0
+				sqls = sqls[0:0]
+				args = args[0:0]
+				lastSyncTime = now
+			}
+
+			time.Sleep(waitTime)
+		}
+	}
+}
+
 func (s *Syncer) run() error {
 	kv := tikv.Driver{}
 	path := fmt.Sprintf("%s://%s", cfg.Store.Name, cfg.Store.Path)
@@ -305,7 +423,7 @@ func (s *Syncer) run() error {
 		return errors.Trace(err)
 	}
 
-	streamer, err := s.syncer.StartSync(s.meta.Pos())
+	streamer, err := s.syncer.StartSync(s.pos.Pos())
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -313,15 +431,12 @@ func (s *Syncer) run() error {
 	s.start = time.Now()
 	s.lastTime = s.start
 
-	s.wg.Add(s.cfg.WorkerCount)
-	for i := 0; i < s.cfg.WorkerCount; i++ {
-		go s.sync(s.toDBs[i], s.jobs[i])
-	}
+	go s.sync(s.toDB, s.jobs)// err only one go?
 
 	s.wg.Add(1)
 	go s.printStatus()
 
-	pos := s.meta.Pos()
+	pos := s.poz.Pos()
 
 	//todb: input
 	for {

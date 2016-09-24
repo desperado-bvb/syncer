@@ -46,7 +46,7 @@ func (m *Mysql) genInsertSQLs(schema string, table *model.TableInfo, rows [][]by
 
 	columnList := genColumnList(columns)
 	columnPlaceholders := genColumnPlaceholders((len(columns)))
-	sql := fmt.Sprintf("replace into %s.%s (%s) values (%s);", schema, table, columnList, columnPlaceholders)
+	sql := fmt.Sprintf("replace into %s.%s (%s) values (%s);", schema, table.Name, columnList, columnPlaceholders)
 
 	for _, row := range rows {
 		remain, pk, err := codec.DecodeOne(row)
@@ -71,13 +71,13 @@ func (m *Mysql) genInsertSQLs(schema string, table *model.TableInfo, rows [][]by
 		var vals []interface{}
 		for _, col := range columns {
 			if IsPKHandleColumn(table, col) {
-				vals = append(vals, pk)
+				vals = append(vals, pk.GetValue())
 				continue
 			}
 
 			val, ok := columnValues[col.ID]
 			if !ok {
-				vals = append(vals, types.NewDatum(col.DefaultValue))
+				vals = append(vals, col.DefaultValue)
 			} else {
 				vals = append(vals, val.GetValue())
 			}
@@ -185,7 +185,7 @@ func (s *Mysql) genDeleteSQLs(schema string, table *model.TableInfo, op opType, 
 		}
 
 		switch op {
-		case delID:
+		case delByID:
 			column := pkColumn(table)
 			if column == nil {
 				return nil, nil, errors.Errorf("table %s.%s dont have pkHandle column", schema, table.Name)
@@ -198,7 +198,7 @@ func (s *Mysql) genDeleteSQLs(schema string, table *model.TableInfo, op opType, 
 
 			value = append(value, r[0].GetValue())
 
-		case delPK:
+		case delByPK:
 			whereColumns = pksColumns(table)
 			if whereColumns == nil {
 				return nil, nil, errors.Errorf("table %s.%s dont have pkHandle column", schema, table.Name)
@@ -212,7 +212,7 @@ func (s *Mysql) genDeleteSQLs(schema string, table *model.TableInfo, op opType, 
 				value = append(value, val.GetValue())
 			}
 
-		case delCol:
+		case delByCol:
 			whereColumns = columns
 
 			var columnValues = make(map[int64]types.Datum)
@@ -345,4 +345,63 @@ func pksColumns(table *model.TableInfo) []*model.ColumnInfo {
 
 func IsPKHandleColumn(table *model.TableInfo, column *model.ColumnInfo) bool {
 	return mysql.HasPriKeyFlag(column.Flag) && table.PKIsHandle
+}
+
+func executeSQL(db *sql.DB, sqls []string, args [][]interface{}, retry bool) error {
+	if len(sqls) == 0 {
+		return nil
+	}
+
+	var (
+		err error
+		txn *sql.Tx
+	)
+
+	retryCount := 1
+	if retry {
+		retryCount = maxRetryCount
+	}
+
+LOOP:
+	for i := 0; i < retryCount; i++ {
+		if i > 0 {
+			log.Warnf("exec sql retry %d - %v - %v", i, sqls, args)
+			time.Sleep(retryTimeout)
+		}
+
+		txn, err = db.Begin()
+		if err != nil {
+			log.Errorf("exec sqls[%v] begin failed %v", sqls, errors.ErrorStack(err))
+			continue
+		}
+
+		for i := range sqls {
+			log.Debugf("[exec][sql]%s[args]%v", sqls[i], args[i])
+
+			_, err = txn.Exec(sqls[i], args[i]...)
+			if err != nil {
+				log.Warnf("[exec][sql]%s[args]%v[error]%v", sqls[i], args[i], err)
+				rerr := txn.Rollback()
+				if rerr != nil {
+					log.Errorf("[exec][sql]%s[args]%v[error]%v", sqls[i], args[i], rerr)
+				}
+				continue LOOP
+			}
+		}
+
+		err = txn.Commit()
+		if err != nil {
+			log.Errorf("exec sqls[%v] commit failed %v", sqls, errors.ErrorStack(err))
+			continue
+		}
+
+		return nil
+	}
+
+	if err != nil {
+		log.Errorf("exec sqls[%v] failed %v", sqls, errors.ErrorStack(err))
+		return errors.Trace(err)
+	}
+
+	return errors.Errorf("exec sqls[%v] failed", sqls)
 }
