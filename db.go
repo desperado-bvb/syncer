@@ -1,11 +1,15 @@
 package syncer
 
 import (
+	"fmt"
+	"strings"
+	
 	"github.com/juju/errors"
 	"github.com/pingcap/tidb/ast"
-	"github.com/pingcap/tidb/infoschema"
 	"github.com/pingcap/tidb/util/codec"
 	"github.com/pingcap/tidb/model"
+	"github.com/pingcap/tidb/mysql"
+	"github.com/pingcap/tidb/parser"
 	"github.com/pingcap/tidb/util/types"
 )
 
@@ -15,18 +19,18 @@ const (
 	insert = iota + 1
 	update
 	del
+	delByID
+	delByPK
+	delByCol
 	ddl
-	delID
-	delPK
-	delCol
 )
 
-type mysql struct{}
+type Mysql struct{}
 
-func (m *mysql) genInsertSQLs(schema string, table *model.TableInfo, rows [][]byte) ([]string, []interface{}, err) {	
+func (m *Mysql) genInsertSQLs(schema string, table *model.TableInfo, rows [][]byte) ([]string, [][]interface{}, error) {	
 	columns := table.Columns
 	sqls := make([]string, 0, len(rows))
-	values := make([][]interface{}, 0, len(datas))
+	values := make([][]interface{}, 0, len(rows))
 	
 	columnList := genColumnList(columns)
 	columnPlaceholders := genColumnPlaceholders((len(columns)))
@@ -34,11 +38,11 @@ func (m *mysql) genInsertSQLs(schema string, table *model.TableInfo, rows [][]by
 
 	for _, row := range rows {
 		remain, pk, err := codec.DecodeOne(row)
-		return err != nil {
+		if err != nil {
 			return nil, nil, errors.Trace(err)
 		}
 
-		r, err := codec.Decod(remain, 2*(len(columns)-1))
+		r, err := codec.Decode(remain, 2*(len(columns)-1))
 		if err != nil {
 			return nil, nil, errors.Trace(err)
 		}
@@ -49,21 +53,21 @@ func (m *mysql) genInsertSQLs(schema string, table *model.TableInfo, rows [][]by
 
 		var columnValues = make(map[int64] types.Datum)
 		for i := 0; i < len(r); i += 2 {
-			columnValues[r[i].GetInt64] = r[i+1]
+			columnValues[r[i].GetInt64()] = r[i+1]
 		}
 
 		var vals []interface{}
 		for _, col := range columns {
-			if col.IsPKHandleColumn(table) {
-				values = append(vals, pk)
+			if IsPKHandleColumn(table, col) {
+				vals = append(vals, pk)
 				continue
 			}
 
 			val, ok := columnValues[col.ID]
 			if !ok {
-				values = append(vals, types.NewDatum(col.DefaultValue))
+				vals = append(vals, types.NewDatum(col.DefaultValue))
 			} else {
-				values = append(vals, val.GetValue())
+				vals = append(vals, val.GetValue())
 			}
 		}
 
@@ -74,7 +78,7 @@ func (m *mysql) genInsertSQLs(schema string, table *model.TableInfo, rows [][]by
 	return sqls, values, nil
 }
 
-func (m *mysql) genUpdateSQLs(schema string, table *model.TableInfo, rows [][]byte) ([]string, []interface{}, error)  {
+func (m *Mysql) genUpdateSQLs(schema string, table *model.TableInfo, rows [][]byte) ([]string, [][]interface{}, error)  {
 	length  := len(rows)
 	columns := table.Columns
 	sqls 	:= make([]string, 0, length)
@@ -98,7 +102,7 @@ func (m *mysql) genUpdateSQLs(schema string, table *model.TableInfo, rows [][]by
 			oldValues = append(oldValues, pk)						
 		}
 
-		r, err := codec.Decod(row, length-1)
+		r, err := codec.Decode(row, length-1)
 		if err != nil {
                         return nil, nil, errors.Trace(err)
                 }
@@ -111,7 +115,7 @@ func (m *mysql) genUpdateSQLs(schema string, table *model.TableInfo, rows [][]by
 			
 			columnValues := make(map[int64] types.Datum)
 			for ; i < len(r)/2; i++ {
-                        	columnValues[r[i].GetInt64] = r[i+1]
+                        	columnValues[r[i].GetInt64()] = r[i+1]
 			}
 
 			for _, col := range columns {
@@ -128,7 +132,7 @@ func (m *mysql) genUpdateSQLs(schema string, table *model.TableInfo, rows [][]by
 		updateColumns = nil
 
                 for ; i < len(r); i += 2 {
-                	columnValues[r[i].GetInt64] = r[i+1]
+                	columnValues[r[i].GetInt64()] = r[i+1]
                 }
 
                 for _, col := range columns {
@@ -153,7 +157,7 @@ func (m *mysql) genUpdateSQLs(schema string, table *model.TableInfo, rows [][]by
 	return sqls, values, nil	
 }
 
-func (s *mysql) genDeleteSQLs(schema string, table *model.TableInfo, op opType, rows [][]byte) ([]string, []interface{}, error) {
+func (s *Mysql) genDeleteSQLs(schema string, table *model.TableInfo, op opType, rows [][]byte) ([]string, [][]interface{}, error) {
 	length  := len(rows)
        	columns := table.Columns
        	sqls   	:= make([]string, 0, length)
@@ -163,7 +167,7 @@ func (s *mysql) genDeleteSQLs(schema string, table *model.TableInfo, op opType, 
 		var whereColumns []*model.ColumnInfo
 		var value []interface{}
 
-		r, err := codec.Decod(row, len(columns))
+		r, err := codec.Decode(row, len(columns))
                 if err != nil {
                         return nil, nil, errors.Trace(err)
                 }
@@ -184,7 +188,7 @@ func (s *mysql) genDeleteSQLs(schema string, table *model.TableInfo, op opType, 
 			
 		case delPK:
 			whereColumns = pksColumns(table)
-			if column == nil {
+			if whereColumns == nil {
 				return nil, nil, errors.Errorf("table %s.%s dont have pkHandle column", schema, table.Name)
 			}
 
@@ -197,11 +201,11 @@ func (s *mysql) genDeleteSQLs(schema string, table *model.TableInfo, op opType, 
 			}
 
 		case delCol:
-			whereColumn = columns
+			whereColumns = columns
 
 			var columnValues = make(map[int64] types.Datum)
 			for i := 0; i < len(r); i += 2 {
-                        	columnValues[r[i].GetInt64] = r[i+1]
+                        	columnValues[r[i].GetInt64()] = r[i+1]
                 	}
 
                 	for _, col := range columns {
@@ -215,8 +219,8 @@ func (s *mysql) genDeleteSQLs(schema string, table *model.TableInfo, op opType, 
 			return nil, nil, errors.Errorf("delete row error type %v", op)
 		}
 
-		where := genWhere(whereColumns, whereValues)
-		values = append(values, whereValues)
+		where := genWhere(whereColumns, value)
+		values = append(values, value)
 
 		sql := fmt.Sprintf("delete from %s.%s where %s limit 1;", schema, table, where)
 		sqls = append(sqls, sql)
@@ -225,25 +229,7 @@ func (s *mysql) genDeleteSQLs(schema string, table *model.TableInfo, op opType, 
 	return sqls, values, nil	
 }
 
-func (s *mysql) ignoreDDLError(err error) bool {
-	mysqlErr, ok := errors.Cause(err).(*mysql.MySQLError)
-	if !ok {
-		return false
-	}
-
-	errCode := terror.ErrCode(mysqlErr.Number)
-	switch errCode {
-	case infoschema.ErrDatabaseExists.Code(), infoschema.ErrDatabaseNotExists.Code(), infoschema.ErrDatabaseDropExists.Code(),
-		infoschema.ErrTableExists.Code(), infoschema.ErrTableNotExists.Code(), infoschema.ErrTableDropExists.Code(),
-		infoschema.ErrColumnExists.Code(), infoschema.ErrColumnNotExists.Code(),
-		infoschema.ErrIndexExists.Code(), tddl.ErrCantDropFieldOrKey.Code():
-		return true
-	default:
-		return false
-	}
-}
-
-func (s *mysql)isDDLSQL(sql string) (bool, error) {
+func (s *Mysql)isDDLSQL(sql string) (bool, error) {
 	stmt, err := parser.New().ParseOneStmt(sql, "", "")
 	if err != nil {
 		return false, errors.Errorf("[sql]%s[error]%v", sql, err)
@@ -254,7 +240,7 @@ func (s *mysql)isDDLSQL(sql string) (bool, error) {
 }
 
 //todo: check ddl query contains schema
-func (s *mysql)genDDLSQL(sql string, schema string) (string, error) {
+func (s *Mysql)genDDLSQL(sql string, schema string) (string, error) {
 	stmt, err := parser.New().ParseOneStmt(sql, "", "")
 	if err != nil {
 		return "", errors.Trace(err)
@@ -268,7 +254,7 @@ func (s *mysql)genDDLSQL(sql string, schema string) (string, error) {
 	return fmt.Sprintf("use %s; %s;", schema, sql), nil
 }
 
-func genColumnList(columns []*mode.ColumnInfo) string {
+func genColumnList(columns []*model.ColumnInfo) string {
 	var columnList []byte
 	for i, column := range columns {
 		columnList = append(columnList, []byte(column.Name.L)...)
@@ -302,7 +288,7 @@ func genKVs(columns []*model.ColumnInfo) string {
 	return string(kvs)
 }
 
-func genWhere(columns []*model.Column, data []interface{}) string {
+func genWhere(columns []*model.ColumnInfo, data []interface{}) string {
 	var kvs []byte
 	for i := range columns {
 		kvSplit := "="
@@ -322,7 +308,7 @@ func genWhere(columns []*model.Column, data []interface{}) string {
 
 func pkColumn(table *model.TableInfo) *model.ColumnInfo {
 	for _, col := range table.Columns {
-       		if col.IsPKHandleColumn(table) {
+       		if IsPKHandleColumn(table, col) {
        			return col
 		}
 	}
@@ -333,9 +319,18 @@ func pkColumn(table *model.TableInfo) *model.ColumnInfo {
 func pksColumns(table *model.TableInfo) []*model.ColumnInfo {
 	for _, idx := range table.Indices {
 		if idx.Primary {
-			return idx.Columns
+			columns := make([]*model.ColumnInfo, len(idx.Columns))
+			for i := range idx.Columns {
+				columns[i] = table.Columns[idx.Columns[i].Offset]
+			}
+
+			return columns
 		}
 	}
 
 	return nil
 }
+
+func IsPKHandleColumn(table *model.TableInfo, column *model.ColumnInfo) bool {
+	return mysql.HasPriKeyFlag(column.Flag) && table.PKIsHandle
+} 

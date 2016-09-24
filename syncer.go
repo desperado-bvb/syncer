@@ -2,6 +2,8 @@ package syncer
 
 import (
 	"github.com/juju/errors"
+	"github.com/pingcap/tidb/kv"
+	"github.com/pingcap/tidb/meta"
 	"github.com/pingcap/tidb/model"
 	pb "github.com/pingcap/tipb/go-binlog"
 	"github.com/pingcap/tidb/kv"
@@ -57,7 +59,7 @@ func (s *Syncer) getSchemaInfo(id int64, sql string) (string, error) {
 		return nil, errors.Trace(err)
 	}
 
-	fo job.SchemaState != model.StatePublic {
+	for job.SchemaState != model.StatePublic {
 		time.Sleep(10*time.Second)
 		job, err = s.getHistoryJob(id)
 		if err != nil {
@@ -72,6 +74,26 @@ func (s *Syncer) getSchemaInfo(id int64, sql string) (string, error) {
 
 	switch stmt.(type) {
 	case *ast.CreateDatabaseStmt:
+		// todo: check the version can be peek by job.SnapshotVer
+		version := kv.NewVersion(job.SnapshotVer)
+    		snapshot, err := store.GetSnapshot(version)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+
+    		snapMeta := meta.NewSnapshotMeta(snapshot)
+		db, err := snapMeta.GetDatabase(job.SchemaID)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+
+		d, ok := s.meta.schemaByID(job.SchemaID)
+                if ok {
+                        return nil, errors.AlreadyExistsf("schema %d", job.SchemaID)
+                }
+
+		s.meta.CreateSchema(db)
+		return db.Name.L, nil
 		
 	case *ast.DropDatabaseStmt:
 		schemaID := job.SchemaID
@@ -81,21 +103,95 @@ func (s *Syncer) getSchemaInfo(id int64, sql string) (string, error) {
 		}
 
 		s.meta.DropSchema(schema.Name)
+		return schema.Name.L, nil
 
 	case *ast.CreateTableStmt:
+		version := kv.NewVersion(job.SnapshotVer)
+                snapshot, err := store.GetSnapshot(version)
+                if err != nil {
+                        return nil, errors.Trace(err)
+                }
+
+		//todb: check job is must with SchemaID, TableID
+		snapMeta := meta.NewSnapshotMeta(snapshot)
+		table, err := snapMeta.GetTable(job.SchemaID, job.TableID)
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+
+		db, ok := s.meta.schemaByID(job.SchemaID)
+		if !ok {
+			return nil, errors.NotFoundf("schema %d", schemaID)
+		}
+
+		tb, ok := s.meta.tableByID(job.TableID)
+		if ok {
+			return nil, errors.AlreadyExistsf("table %d", job.TableID)
+		}
+
+		s.meta.CreateTable(db.Name, table)
+		return db.Name, nil
+
 	case *ast.DropTableStmt:
 		tableID := job.TableID
+		dbID := job.SchemaID
+
+		db, ok := s.meta.schemaByID(job.SchemaID)
+                if !ok {
+			return nil, errors.NotFoundf("schema %d", schemaID)
+		}
+
                 table, ok := s.meta.TableByID(tableID)
                 if !ok {
                         return nil, errors.NotFoundf("table %d", tabelID)
                 }
 
-		tableName := s.meta.TableNamebyID(tableID)
-                s.meta.DropSchema(tableName)
+                s.meta.DropTable(db.Name, table.Name)
+		return db.Name.L, nil
 
 	case *ast.AlterTableSpec:
-	}
+		version := kv.NewVersion(job.SnapshotVer)
+                snapshot, err := store.GetSnapshot(version)
+                if err != nil {
+                        return nil, errors.Trace(err)
+                }
+
+                snapMeta := meta.NewSnapshotMeta(snapshot)
+                table, err := snapMeta.GetTable(job.SchemaID, job.TableID)
+                if err != nil {
+                        return nil, errors.Trace(err)
+                }
+
+                db, ok := s.meta.schemaByID(job.SchemaID)
+                if !ok {
+                        return nil, errors.NotFoundf("schema %d", schemaID)
+                }
+
+                tb, ok := s.meta.tableByID(job.TableID)
+                if !ok {
+                        return nil, errors.NotFoundf("table %d", job.TableID)
+                }
+
+		s.meta.DropTable(db.Name, tb.Name)
+		s.meta.Createtable(db.Name, table)
 	
+		return db.Name.L, nil
+	
+	defaut:
+		version := kv.NewVersion(job.SnapshotVer)
+                snapshot, err := store.GetSnapshot(version)
+                if err != nil {
+                        return nil, errors.Trace(err)
+                }
+
+                snapMeta := meta.NewSnapshotMeta(snapshot)
+                db, err := snapMeta.GetDatabase(job.SchemaID)
+                if err != nil {
+                        return nil, errors.Trace(err)
+                }
+		
+		return 	db.Name.L, nil
+	}	
 }
 
 func (s *Syncer) getHistoryJob(id int64) err {
