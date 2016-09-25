@@ -48,7 +48,7 @@ func (m *Mysql) genInsertSQLs(schema string, table *model.TableInfo, rows [][]by
 		}
 
 		if len(r)%2 != 0 {
-			return nil, nil, errors.Errorf("table %s.%s insert row raw data is corruption %s", schema, table.Name, row)
+			return nil, nil, errors.Errorf("table %s.%s insert row raw data is corruption %v", schema, table.Name, r)
 		}
 
 		var columnValues = make(map[int64]types.Datum)
@@ -99,7 +99,7 @@ func (m *Mysql) genUpdateSQLs(schema string, table *model.TableInfo, rows [][]by
 			}
 			row = remain
 
-			oldValues = append(oldValues, pk)
+			oldValues = append(oldValues, pk.GetValue())
 		}
 
 		r, err := codec.Decode(row, length-1)
@@ -109,12 +109,12 @@ func (m *Mysql) genUpdateSQLs(schema string, table *model.TableInfo, rows [][]by
 
 		var i int
 		if pc == nil {
-			if len(r)%2 != 2 {
-				return nil, nil, errors.Errorf("table %s.%s update row raw data is corruption %s", schema, table.Name, row)
+			if len(r)%2 != 0 {
+				return nil, nil, errors.Errorf("table %s.%s update row data is corruption %v", schema, table.Name, r)
 			}
 
 			columnValues := make(map[int64]types.Datum)
-			for ; i < len(r)/2; i++ {
+			for ; i < len(r)/2; i += 2 {
 				columnValues[r[i].GetInt64()] = r[i+1]
 			}
 
@@ -157,35 +157,45 @@ func (m *Mysql) genUpdateSQLs(schema string, table *model.TableInfo, rows [][]by
 	return sqls, values, nil
 }
 
+func (s *Mysql) genDeleteSQLsByID(schema string, table *model.TableInfo, rows []int64) ([]string, [][]interface{}, error) {
+	sqls := make([]string, 0, len(rows))
+	values := make([][]interface{}, 0, len(rows))
+	column := pkColumn(table)
+	if column == nil {
+		return nil, nil, errors.Errorf("table %s.%s dont have pkHandle column", schema, table.Name)
+	}
+
+	whereColumns := []*model.ColumnInfo{column}
+
+	for _, rowID := range rows {
+		var value []interface{}
+		value = append(value, rowID)
+
+		where := genWhere(whereColumns, value)
+		values = append(values, value)
+
+		sql := fmt.Sprintf("delete from %s.%s where %s limit 1;", schema, table.Name, where)
+		sqls = append(sqls, sql)
+	}
+
+	return sqls, values, nil
+
+}
+
 func (s *Mysql) genDeleteSQLs(schema string, table *model.TableInfo, op opType, rows [][]byte) ([]string, [][]interface{}, error) {
-	length := len(rows)
 	columns := table.Columns
-	sqls := make([]string, 0, length)
-	values := make([][]interface{}, 0, length)
+	sqls := make([]string, 0, len(rows))
+	values := make([][]interface{}, 0, len(rows))
 
 	for _, row := range rows {
 		var whereColumns []*model.ColumnInfo
 		var value []interface{}
-
 		r, err := codec.Decode(row, len(columns))
 		if err != nil {
 			return nil, nil, errors.Trace(err)
 		}
 
 		switch op {
-		case delByID:
-			column := pkColumn(table)
-			if column == nil {
-				return nil, nil, errors.Errorf("table %s.%s dont have pkHandle column", schema, table.Name)
-			}
-
-			whereColumns = append(whereColumns, column)
-			if len(r) != 1 {
-				return nil, nil, errors.Errorf("table %s.%s the delete row by id binlog is courruption", schema, table.Name, row)
-			}
-
-			value = append(value, r[0].GetValue())
-
 		case delByPK:
 			whereColumns = pksColumns(table)
 			if whereColumns == nil {
@@ -193,7 +203,7 @@ func (s *Mysql) genDeleteSQLs(schema string, table *model.TableInfo, op opType, 
 			}
 
 			if len(r) != len(whereColumns) {
-				return nil, nil, errors.Errorf("table %s.%s the delete row by pks  binlog is courruption", schema, table.Name, row)
+				return nil, nil, errors.Errorf("table %s.%s the delete row by pks binlog %v is courruption", schema, table.Name, r)
 			}
 
 			for _, val := range r {
@@ -203,15 +213,18 @@ func (s *Mysql) genDeleteSQLs(schema string, table *model.TableInfo, op opType, 
 		case delByCol:
 			whereColumns = columns
 
+			if len(r)/2 != len(whereColumns) {
+				return nil, nil, errors.Errorf("table %s.%s the delete row by cols binlog %v is courruption", schema, table.Name, r)
+			}
+
 			var columnValues = make(map[int64]types.Datum)
 			for i := 0; i < len(r); i += 2 {
 				columnValues[r[i].GetInt64()] = r[i+1]
 			}
 
 			for _, col := range columns {
-
 				val, ok := columnValues[col.ID]
-				if !ok {
+				if ok {
 					value = append(value, val.GetValue())
 				}
 			}
@@ -222,7 +235,7 @@ func (s *Mysql) genDeleteSQLs(schema string, table *model.TableInfo, op opType, 
 		where := genWhere(whereColumns, value)
 		values = append(values, value)
 
-		sql := fmt.Sprintf("delete from %s.%s where %s limit 1;", schema, table, where)
+		sql := fmt.Sprintf("delete from %s.%s where %s limit 1;", schema, table.Name, where)
 		sqls = append(sqls, sql)
 	}
 
@@ -319,12 +332,19 @@ func pkColumn(table *model.TableInfo) *model.ColumnInfo {
 func pksColumns(table *model.TableInfo) []*model.ColumnInfo {
 	for _, idx := range table.Indices {
 		if idx.Primary {
-			columns := make([]*model.ColumnInfo, len(idx.Columns))
-			for i := range idx.Columns {
-				columns[i] = table.Columns[idx.Columns[i].Offset]
+			var cols []*model.ColumnInfo
+			columns := make(map[string]byte)
+			for _, col := range idx.Columns {
+				columns[col.Name.L] = 0x01
 			}
 
-			return columns
+			for _, col := range table.Columns {
+				if _, ok := columns[col.Name.L]; ok {
+					cols = append(cols, col)
+				}
+			}
+
+			return cols
 		}
 	}
 
