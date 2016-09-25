@@ -1,8 +1,7 @@
-package syncer
+package db
 
 import (
 	"testing"
-	//	"fmt"
 
 	. "github.com/pingcap/check"
 
@@ -54,7 +53,7 @@ func (s *testDBSuite) TestGenInsertSQLs(c *C) {
 	c.Assert(err, IsNil)
 	bin := append(handleVal, value...)
 
-	sqls, vals, err := ms.genInsertSQLs(schema, table, [][]byte{bin})
+	sqls, vals, err := ms.GenInsertSQLs(schema, table, [][]byte{bin})
 	c.Assert(err, IsNil)
 	c.Assert(len(sqls), Equals, 1)
 	if sqls[0] != "replace into t.account (id,name,male) values (?,?,?);" {
@@ -79,7 +78,7 @@ func (s *testDBSuite) TestGenInsertSQLs(c *C) {
 	c.Assert(err, IsNil)
 	bin = append(handleVal, value...)
 
-	sqls, vals, err = ms.genInsertSQLs(schema, table, [][]byte{bin})
+	sqls, vals, err = ms.GenInsertSQLs(schema, table, [][]byte{bin})
 	c.Assert(err, IsNil)
 	c.Assert(len(sqls), Equals, 1)
 	if sqls[0] != "replace into t.account (id,name,male) values (?,?,?);" {
@@ -106,7 +105,7 @@ func (s *testDBSuite) TestGenInsertSQLs(c *C) {
 	c.Assert(err, IsNil)
 	bin = append(handleVal, value...)
 
-	sqls, vals, err = ms.genInsertSQLs(schema, table, [][]byte{bin})
+	sqls, vals, err = ms.GenInsertSQLs(schema, table, [][]byte{bin})
 	c.Assert(err, IsNil)
 	c.Assert(len(sqls), Equals, 1)
 	if sqls[0] != "replace into t.account (id,name,male) values (?,?,?);" {
@@ -177,7 +176,7 @@ func (s *testDBSuite) TestGenUpdateSQLs(c *C) {
 	c.Assert(err, IsNil)
 	bin = append(bin, oldBin...)
 
-	sqls, vals, err := ms.genUpdateSQLs(schema, table, [][]byte{bin})
+	sqls, vals, err := ms.GenUpdateSQLs(schema, table, [][]byte{bin})
 	c.Assert(err, IsNil)
 	c.Assert(len(sqls), Equals, 1)
 	if sqls[0] != "update t.account set ID = ?, Name = ?, male = ? where ID = ? and Name = ? and male = ? limit 1;" {
@@ -207,7 +206,7 @@ func (s *testDBSuite) TestGenUpdateSQLs(c *C) {
 	handleData, err := codec.EncodeValue(nil, types.NewIntDatum(1))
 	bin = append(handleData, bin...)
 
-	sqls, vals, err = ms.genUpdateSQLs(schema, table, [][]byte{bin})
+	sqls, vals, err = ms.GenUpdateSQLs(schema, table, [][]byte{bin})
 	c.Assert(err, IsNil)
 	c.Assert(len(sqls), Equals, 1)
 	if sqls[0] != "update t.account set ID = ?, Name = ?, male = ? where ID = ? limit 1;" {
@@ -235,7 +234,7 @@ func (s *testDBSuite) TestGenDeleteSQLs(c *C) {
 	table := generateTestTable()
 
 	rowsID := []int64{1}
-	sqls, vals, err := ms.genDeleteSQLsByID(schema, table, rowsID)
+	sqls, vals, err := ms.GenDeleteSQLsByID(schema, table, rowsID)
 	c.Assert(err, IsNil)
 	c.Assert(len(sqls), Equals, 1)
 	if sqls[0] != "delete from t.account where ID = ? limit 1;" {
@@ -253,7 +252,7 @@ func (s *testDBSuite) TestGenDeleteSQLs(c *C) {
 	row := []types.Datum{types.NewDatum("liming")}
 	bin, _ := codec.EncodeKey(nil, row...)
 
-	sqls, vals, err = ms.genDeleteSQLs(schema, table, delByPK, [][]byte{bin})
+	sqls, vals, err = ms.GenDeleteSQLs(schema, table, delByPK, [][]byte{bin})
 	c.Assert(err, IsNil)
 	c.Assert(len(sqls), Equals, 1)
 	if sqls[0] != "delete from t.account where Name = ? limit 1;" {
@@ -291,7 +290,7 @@ func (s *testDBSuite) TestGenDeleteSQLs(c *C) {
 	bin, err = tablecodec.EncodeRow(row, colIDs)
 	c.Assert(err, IsNil)
 
-	sqls, vals, err = ms.genDeleteSQLs(schema, table, delByCol, [][]byte{bin})
+	sqls, vals, err = ms.GenDeleteSQLs(schema, table, delByCol, [][]byte{bin})
 	c.Assert(err, IsNil)
 	c.Assert(len(sqls), Equals, 1)
 	if sqls[0] != "delete from t.account where ID = ? and Name = ? and male = ? limit 1;" {
@@ -314,19 +313,19 @@ func (s *testDBSuite) TestGenDeleteSQLs(c *C) {
 func (s *testDBSuite) TestGenDLLSQL(c *C) {
 	ms := &Mysql{}
 
-	ok, err := ms.isDDLSQL("create database t")
+	ok, err := ms.IsDDLSQL("create database t")
 	c.Assert(err, IsNil)
 	c.Assert(ok, Equals, true)
 
-	ok, err = ms.isDDLSQL("select * from t.account limit 1")
+	ok, err = ms.IsDDLSQL("select * from t.account limit 1")
 	c.Assert(err, IsNil)
 	c.Assert(ok, Equals, false)
 
-	sql, err := ms.genDDLSQL("create database t", "t")
+	sql, err := ms.GenDDLSQL("create database t", "t")
 	c.Assert(err, IsNil)
 	c.Assert(sql, Equals, "create database t;")
 
-	sql, err = ms.genDDLSQL("drop table t", "t")
+	sql, err = ms.GenDDLSQL("drop table t", "t")
 	c.Assert(err, IsNil)
 	c.Assert(sql, Equals, "use t; drop table t;")
 }

@@ -1,4 +1,4 @@
-package syncer
+package db
 
 import (
 	"fmt"
@@ -13,21 +13,15 @@ import (
 	"github.com/pingcap/tidb/util/types"
 )
 
-type opType int
-
-const (
-	insert = iota + 1
-	update
-	del
-	delByID
-	delByPK
-	delByCol
-	ddl
-)
-
 type Mysql struct{}
 
-func (m *Mysql) genInsertSQLs(schema string, table *model.TableInfo, rows [][]byte) ([]string, [][]interface{}, error) {
+var mysqlTranslator = &Mysql{}
+
+func init() {
+	Register("mysql", mysqlTranslator)
+}
+
+func (m *Mysql) GenInsertSQLs(schema string, table *model.TableInfo, rows [][]byte) ([]string, [][]interface{}, error) {
 	columns := table.Columns
 	sqls := make([]string, 0, len(rows))
 	values := make([][]interface{}, 0, len(rows))
@@ -78,7 +72,7 @@ func (m *Mysql) genInsertSQLs(schema string, table *model.TableInfo, rows [][]by
 	return sqls, values, nil
 }
 
-func (m *Mysql) genUpdateSQLs(schema string, table *model.TableInfo, rows [][]byte) ([]string, [][]interface{}, error) {
+func (m *Mysql) GenUpdateSQLs(schema string, table *model.TableInfo, rows [][]byte) ([]string, [][]interface{}, error) {
 	length := len(rows)
 	columns := table.Columns
 	sqls := make([]string, 0, length)
@@ -157,7 +151,7 @@ func (m *Mysql) genUpdateSQLs(schema string, table *model.TableInfo, rows [][]by
 	return sqls, values, nil
 }
 
-func (s *Mysql) genDeleteSQLsByID(schema string, table *model.TableInfo, rows []int64) ([]string, [][]interface{}, error) {
+func (s *Mysql) GenDeleteSQLsByID(schema string, table *model.TableInfo, rows []int64) ([]string, [][]interface{}, error) {
 	sqls := make([]string, 0, len(rows))
 	values := make([][]interface{}, 0, len(rows))
 	column := pkColumn(table)
@@ -182,7 +176,7 @@ func (s *Mysql) genDeleteSQLsByID(schema string, table *model.TableInfo, rows []
 
 }
 
-func (s *Mysql) genDeleteSQLs(schema string, table *model.TableInfo, op opType, rows [][]byte) ([]string, [][]interface{}, error) {
+func (s *Mysql) GenDeleteSQLs(schema string, table *model.TableInfo, op opType, rows [][]byte) ([]string, [][]interface{}, error) {
 	columns := table.Columns
 	sqls := make([]string, 0, len(rows))
 	values := make([][]interface{}, 0, len(rows))
@@ -242,7 +236,7 @@ func (s *Mysql) genDeleteSQLs(schema string, table *model.TableInfo, op opType, 
 	return sqls, values, nil
 }
 
-func (s *Mysql) isDDLSQL(sql string) (bool, error) {
+func (s *Mysql) IsDDLSQL(sql string) (bool, error) {
 	stmt, err := parser.New().ParseOneStmt(sql, "", "")
 	if err != nil {
 		return false, errors.Errorf("[sql]%s[error]%v", sql, err)
@@ -253,7 +247,7 @@ func (s *Mysql) isDDLSQL(sql string) (bool, error) {
 }
 
 //todo: check ddl query contains schema
-func (s *Mysql) genDDLSQL(sql string, schema string) (string, error) {
+func (s *Mysql) GenDDLSQL(sql string, schema string) (string, error) {
 	stmt, err := parser.New().ParseOneStmt(sql, "", "")
 	if err != nil {
 		return "", errors.Trace(err)
